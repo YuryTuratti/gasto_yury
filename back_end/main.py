@@ -52,69 +52,60 @@ def iniciar_banco():
 iniciar_banco()
 
 # ---------------------------------------------------------
-# FUNÇÃO AUXILIAR: EXTRAIR TEXTO DA EVOLUTION API
-# ---------------------------------------------------------
-def extrair_texto_evolution(payload):
-    """
-    Navega pelo JSON da Evolution API para encontrar o texto da mensagem.
-    Suporta mensagens simples e mensagens com link/formatadas.
-    """
-    try:
-        data = payload.get("data", {})
-        message = data.get("message", {})
-        
-        # Tenta pegar mensagem simples ou mensagem estendida
-        texto = message.get("conversation") or \
-                message.get("extendedTextMessage", {}).get("text")
-        
-        return texto if texto else ""
-    except Exception:
-        return ""
-
-# ---------------------------------------------------------
-# ROTA DO WEBHOOK
+# ROTA DO WEBHOOK (Ouvindo a Evolution API)
 # ---------------------------------------------------------
 @app.post("/webhook")
 async def receber_mensagem(request: Request):
-    payload = await request.json()
-    
-    # LOG para depuração no Docker
-    print("\n=== NOVO WEBHOOK RECEBIDO ===", flush=True)
-    
-    texto_whatsapp = extrair_texto_evolution(payload)
-    print(f"Texto extraído: {texto_whatsapp}", flush=True)
-
-    if not texto_whatsapp or ";" not in texto_whatsapp:
-        print("Mensagem ignorada (não contém o formato esperado).", flush=True)
-        return {"status": "ignorado", "motivo": "Formato inválido"}
-
     try:
-        # Lógica de separação: Tipo ; Valor ; Categoria ; Descrição
-        dados = texto_whatsapp.split(";")
+        payload = await request.json()
         
-        if len(dados) < 3:
-            return {"status": "erro", "mensagem": "Use: Tipo ; Valor ; Categoria"}
-            
-        tipo = dados[0].strip().lower()
-        valor = float(dados[1].strip().replace(',', '.'))
-        categoria = dados[2].strip()
-        descricao = dados[3].strip() if len(dados) > 3 else ""
-        
-        # Inserção no PostgreSQL
-        conexao = conectar_banco()
-        cursor = conexao.cursor()
-        cursor.execute('''
-            INSERT INTO transacoes (tipo, valor, categoria, descricao, data_registro)
-            VALUES (%s, %s, %s, %s, %s)
-        ''', (tipo, valor, categoria, descricao, datetime.now()))
-        
-        conexao.commit()
-        cursor.close()
-        conexao.close()
+        # LOG DE DEBUG: Isso vai mostrar exatamente o que a Evolution está enviando
+        print("\n=== WEBHOOK RECEBIDO ===", flush=True)
+        print(json.dumps(payload, indent=2), flush=True)
 
-        print(f"✅ Salvo: {tipo} | R$ {valor} | {categoria}", flush=True)
-        return {"status": "sucesso"}
+        # 1. Tenta extrair o texto da mensagem (Padrão Evolution API v1.x e v2.x)
+        data = payload.get("data", {})
+        message = data.get("message", {})
+        
+        # A mensagem pode vir em 'conversation' ou 'extendedTextMessage'
+        texto_whatsapp = message.get("conversation") or \
+                         message.get("extendedTextMessage", {}).get("text")
+
+        if not texto_whatsapp:
+            print("⚠️ Nenhuma mensagem de texto encontrada no payload.", flush=True)
+            return {"status": "sucesso", "info": "evento_recebido_sem_texto"}
+
+        print(f"📩 Texto extraído: {texto_whatsapp}", flush=True)
+
+        # 2. Verifica se a mensagem segue o formato: tipo ; valor ; categoria ; descricao
+        if ";" in texto_whatsapp:
+            dados = texto_whatsapp.split(";")
+            
+            # Limpa e organiza os dados
+            tipo = dados[0].strip().lower()
+            valor = float(dados[1].strip().replace(',', '.'))
+            categoria = dados[2].strip()
+            descricao = dados[3].strip() if len(dados) > 3 else ""
+
+            # 3. Salva no Banco de Dados
+            conexao = conectar_banco()
+            cursor = conexao.cursor()
+            cursor.execute('''
+                INSERT INTO transacoes (tipo, valor, categoria, descricao, data_registro)
+                VALUES (%s, %s, %s, %s, %s)
+            ''', (tipo, valor, categoria, descricao, datetime.now()))
+            
+            conexao.commit()
+            cursor.close()
+            conexao.close()
+
+            print(f"✅ REGISTRO SALVO NO POSTGRES: {tipo} | R$ {valor}", flush=True)
+            return {"status": "sucesso", "mensagem": "Gravado com sucesso"}
+        
+        else:
+            print("ℹ️ Mensagem recebida, mas não está no formato 'tipo ; valor ; categoria'.", flush=True)
+            return {"status": "sucesso", "info": "texto_ignorado"}
 
     except Exception as e:
-        print(f"❌ Erro ao processar: {e}", flush=True)
-        return {"status": "erro", "detalhe": str(e)}
+        print(f"❌ ERRO NO PROCESSAMENTO: {str(e)}", flush=True)
+        return {"status": "erro", "detalhes": str(e)}
