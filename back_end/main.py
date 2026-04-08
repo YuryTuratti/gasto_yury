@@ -2,15 +2,16 @@ from fastapi import FastAPI, Request
 from datetime import datetime
 import psycopg2
 import os
+import json
 from dotenv import load_dotenv
 
-# Carrega as variáveis de ambiente do arquivo .env
+# Carrega as variáveis de ambiente
 load_dotenv()
 
 app = FastAPI()
 
 # ---------------------------------------------------------
-# CONFIGURAÇÃO DO POSTGRESQL (Usando .env)
+# CONFIGURAÇÃO DO POSTGRESQL
 # ---------------------------------------------------------
 DB_HOST = os.getenv("DB_HOST")
 DB_NAME = os.getenv("DB_NAME")
@@ -31,8 +32,6 @@ def iniciar_banco():
     try:
         conexao = conectar_banco()
         cursor = conexao.cursor()
-        
-        # Cria a tabela caso não exista
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS transacoes (
                 id SERIAL PRIMARY KEY,
@@ -46,39 +45,64 @@ def iniciar_banco():
         conexao.commit()
         cursor.close()
         conexao.close()
-        print("✅ Banco de dados conectado e tabela verificada.")
+        print("✅ Banco de dados conectado e tabela verificada.", flush=True)
     except Exception as e:
-        print(f"❌ Erro ao conectar no PostgreSQL: {e}")
-        print("Verifique se o Postgres está rodando e se os dados no .env estão corretos.")
+        print(f"❌ Erro ao conectar no PostgreSQL: {e}", flush=True)
 
-# Executa a verificação do banco ao iniciar a API
 iniciar_banco()
 
 # ---------------------------------------------------------
-# ROTA DO WEBHOOK (Recebe os gastos via WhatsApp)
+# FUNÇÃO AUXILIAR: EXTRAIR TEXTO DA EVOLUTION API
+# ---------------------------------------------------------
+def extrair_texto_evolution(payload):
+    """
+    Navega pelo JSON da Evolution API para encontrar o texto da mensagem.
+    Suporta mensagens simples e mensagens com link/formatadas.
+    """
+    try:
+        data = payload.get("data", {})
+        message = data.get("message", {})
+        
+        # Tenta pegar mensagem simples ou mensagem estendida
+        texto = message.get("conversation") or \
+                message.get("extendedTextMessage", {}).get("text")
+        
+        return texto if texto else ""
+    except Exception:
+        return ""
+
+# ---------------------------------------------------------
+# ROTA DO WEBHOOK
 # ---------------------------------------------------------
 @app.post("/webhook")
 async def receber_mensagem(request: Request):
     payload = await request.json()
-    texto_whatsapp = payload.get("mensagem", "")
     
+    # LOG para depuração no Docker
+    print("\n=== NOVO WEBHOOK RECEBIDO ===", flush=True)
+    
+    texto_whatsapp = extrair_texto_evolution(payload)
+    print(f"Texto extraído: {texto_whatsapp}", flush=True)
+
+    if not texto_whatsapp or ";" not in texto_whatsapp:
+        print("Mensagem ignorada (não contém o formato esperado).", flush=True)
+        return {"status": "ignorado", "motivo": "Formato inválido"}
+
     try:
-        # Lógica de separação da string
+        # Lógica de separação: Tipo ; Valor ; Categoria ; Descrição
         dados = texto_whatsapp.split(";")
         
-        if len(dados) != 4:
-            return {"status": "erro", "mensagem": "Formato inválido. Use: Tipo ; Valor ; Categoria ; Descrição"}
+        if len(dados) < 3:
+            return {"status": "erro", "mensagem": "Use: Tipo ; Valor ; Categoria"}
             
         tipo = dados[0].strip().lower()
-        # Tratamento para aceitar vírgula ou ponto nos centavos
         valor = float(dados[1].strip().replace(',', '.'))
         categoria = dados[2].strip()
-        descricao = dados[3].strip()
+        descricao = dados[3].strip() if len(dados) > 3 else ""
         
-        # Inserção segura no PostgreSQL
+        # Inserção no PostgreSQL
         conexao = conectar_banco()
         cursor = conexao.cursor()
-        
         cursor.execute('''
             INSERT INTO transacoes (tipo, valor, categoria, descricao, data_registro)
             VALUES (%s, %s, %s, %s, %s)
@@ -88,12 +112,9 @@ async def receber_mensagem(request: Request):
         cursor.close()
         conexao.close()
 
-        print(f"✅ Registro salvo: {tipo.capitalize()} | R$ {valor:.2f} | {categoria} | {descricao}")
-        
-        return {"status": "sucesso", "mensagem": "Registro processado com sucesso!"}
+        print(f"✅ Salvo: {tipo} | R$ {valor} | {categoria}", flush=True)
+        return {"status": "sucesso"}
 
-    except ValueError:
-        return {"status": "erro", "mensagem": "O valor informado não é um número válido."}
     except Exception as e:
-        print(f"❌ Erro interno: {e}")
-        return {"status": "erro", "mensagem": "Erro interno no servidor."}
+        print(f"❌ Erro ao processar: {e}", flush=True)
+        return {"status": "erro", "detalhe": str(e)}
